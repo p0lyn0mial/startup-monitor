@@ -78,18 +78,20 @@ func (sm *StartupMonitor) sync() error {
 		sm.monitorTimeStamp = time.Now()
 	}
 
-	// check if we reach the timeout
-	if time.Now().After(sm.monitorTimeStamp.Add(sm.timeout)) {
-		klog.Info("timed out while waiting for the target to become healthy, starting a fall back procedure")
-		if err := sm.fallbackToPreviousRevision(); err != nil {
+	// first check if the target is healthy
+	// note that we will always reconcile on transient errors
+	// before starting the fall back procedure
+	if sm.isTargetHealthy() {
+		if err := sm.createLastKnowGoodRevisionAndExit(); err != nil {
 			return err
 		}
 		return nil
 	}
 
-	// check if the target is healthy
-	if sm.isTargetHealthy() {
-		if err := sm.createLastKnowGoodRevisionAndExit(); err != nil {
+	// check if we reach the timeout
+	if time.Now().After(sm.monitorTimeStamp.Add(sm.timeout)) {
+		klog.Info("timed out while waiting for the target to become healthy, starting a fall back procedure")
+		if err := sm.fallbackToPreviousRevision(); err != nil {
 			return err
 		}
 		return nil
@@ -116,7 +118,7 @@ func (sm *StartupMonitor) createLastKnowGoodRevisionAndExit() error {
 	}
 
 	// step 1: create last know good revision
-	if err := sm.io.Symlink(lastKnowGoodManifestDstPath, lastKnowGoodManifestSrcPath); err != nil {
+	if err := sm.io.Symlink(lastKnowGoodManifestSrcPath, lastKnowGoodManifestDstPath); err != nil {
 		return fmt.Errorf("failed to create a symbolic link %q for %q due to %v", lastKnowGoodManifestDstPath, lastKnowGoodManifestSrcPath, err)
 	}
 
@@ -125,14 +127,15 @@ func (sm *StartupMonitor) createLastKnowGoodRevisionAndExit() error {
 	return fmt.Errorf("implement me")
 }
 
-// TODO: pruner|installer: protect the lined revision
+// TODO: pruner|installer: protect the linked revision
 // TODO: step 4: commit suicide ?
 func (sm *StartupMonitor) fallbackToPreviousRevision() error {
 	// step 0: if the last know good revision doesn't exist
 	//         find a previous revision to work with
 	//         return in case no revision has been found
+	//           TODO: or go to step 4
 
-	// step 1: if last known good revision exits and we got here
+	// step 1: if the last known good revision exits and we got here
 	//         that could mean that:
 	//          - the current revision is broken
 	//          - the previous iteration of the sync loop returned an error
