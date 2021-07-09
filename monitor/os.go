@@ -1,16 +1,18 @@
 package monitor
 
 import (
+	"io/fs"
 	"io/ioutil"
 	"os"
 )
 
-// IOInterface collects file system level operations that need to be mocked out during tests
-type IOInterface interface {
+// ioInterface collects file system level operations that need to be mocked out during tests
+type ioInterface interface {
 	Symlink(oldname string, newname string) error
 	Stat(path string) (os.FileInfo, error)
 	Remove(path string) error
-    ReadFile(filename string) ([]byte, error)
+	ReadFile(filename string) ([]byte, error)
+	WriteFile(filename string, data []byte, perm fs.FileMode) error
 }
 
 // realFS is used to dispatch the real system level operations.
@@ -34,4 +36,9 @@ func (realFS) Remove(path string) error {
 // ReadFile will call ioutil.ReadFile to read data
 func (realFS) ReadFile(filename string) ([]byte, error) {
 	return ioutil.ReadFile(filename)
+}
+
+// WriteFile will call ioutil.WriteFile to write data
+func (realFS) WriteFile(filename string, data []byte, perm fs.FileMode) error {
+	return ioutil.WriteFile(filename, data, perm)
 }
