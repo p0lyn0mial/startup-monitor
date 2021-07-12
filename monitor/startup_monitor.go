@@ -18,6 +18,13 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// StartupMonitor is a controller that watches an operand's health condition
+// and falls back to the previous version in case the current version is considered unhealthy.
+//
+// This controller understands a tree structure created by an OCP installation. That is:
+//  The root manifest are looked up in the manifestPath
+//  The revisioned manifest are looked up in the staticPodResourcesPath
+//  The target (operand) name is derived from the targetName.
 type StartupMonitor struct {
 	// probeInterval specifies a time interval at which health of the target will be assessed
 	// be mindful of not setting it too low, on each iteration, an i/o is involved
@@ -36,10 +43,13 @@ type StartupMonitor struct {
 	// manifestsPath points to the directory that holds the root manifests
 	manifestsPath string
 
-	// staticPodResourcesPath points to the directory that holds revisioned pod manifests
+	// staticPodResourcesPath points to the directory that holds revisioned manifests
 	staticPodResourcesPath string
 
-	// isTargetHealthy defines a function that abstracts away assessing operand's health condition
+	// isTargetHealthy defines a function that abstracts away assessing operand's health condition.
+	// the provided functions should be async and cheap in a sense that it shouldn't assess the target
+	// only read the current state.
+	// mainly because we acquire a lock on each sync.
 	isTargetHealthy func() bool
 
 	// records the time the monitor has started assessing operand's health condition
@@ -117,8 +127,6 @@ func (sm *StartupMonitor) sync() error {
 }
 
 func (sm *StartupMonitor) createLastKnowGoodRevisionAndDestroy() error {
-	//var lastKnownGoodManifestSrcPath = sm.targetManifestPathFor(sm.revision)
-
 	// step 0: rm the previous last good known revision if exists
 	// step 1: create last known good revision
 	if err := sm.createLastKnowGoodRevisionFor(sm.revision, true); err != nil {

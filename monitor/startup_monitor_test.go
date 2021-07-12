@@ -6,22 +6,156 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/openshift/library-go/pkg/operator/resource/resourceread"
+	"k8s.io/apimachinery/pkg/api/equality"
+	kerrors "k8s.io/apimachinery/pkg/util/errors"
 )
 
+var samplePod = `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-apiserver
+`
+
+func TestFallbackToPreviousRevision(t *testing.T) {
+	scenarios := []struct {
+		name        string
+		fakeIO      *fakeIO
+		expectedErr string
+	}{
+		// scenario 1
+		{
+			name: "happy path",
+			fakeIO: &fakeIO{
+				ExpectedStatFnCounter: 1, ExpectedReadFileFnCounter: 1, ExpectedWriteFileFnCounter: 1, ExpectedRemoveFnCounter: 1,
+				StatFn: func(path string) (os.FileInfo, error) {
+					if path != "/etc/kubernetes/static-pod-resources/kube-apiserver-last-known-good" {
+						return nil, fmt.Errorf("unexpected path %s", path)
+					}
+					return fakeFile("/etc/kubernetes/static-pod-resources/kube-apiserver-last-known-good"), nil
+				},
+				ReadFileFn: func(path string) ([]byte, error) {
+					if path != "/etc/kubernetes/static-pod-resources/kube-apiserver-last-known-good" {
+						return nil, fmt.Errorf("unexpected path %s", path)
+					}
+					return []byte(samplePod), nil
+				},
+				WriteFileFn: func(filename string, data []byte, perm fs.FileMode) error {
+					if filename != "/etc/kubernetes/manifests/kube-apiserver-pod.yaml" {
+						return fmt.Errorf("unexpected path %s", filename)
+					}
+					actualPod, err := resourceread.ReadPodV1(data)
+					if err != nil {
+						return err
+					}
+					expectedPod, err := resourceread.ReadPodV1([]byte(samplePod))
+					if err != nil {
+						return err
+					}
+					expectedPod.UID = actualPod.UID
+					expectedPod.Annotations = map[string]string{}
+					expectedPod.Annotations["startup-monitor.static-pods.openshift.io/fallback-for-revision"] = "8"
+					if !equality.Semantic.DeepEqual(actualPod, expectedPod) {
+						return fmt.Errorf("unexpected pod was written")
+					}
+					return nil
+				},
+			},
+		},
+
+		// scenario 2
+		{
+			name: "last known doesn't exist",
+			fakeIO: &fakeIO{
+				ExpectedStatFnCounter: 2, ExpectedReadDirFnCounter: 1, ExpectedWriteFileFnCounter: 1, ExpectedRemoveFnCounter: 1, ExpectedReadFileFnCounter: 1, ExpectedSymlinkFnCounter: 1,
+				StatFn: func(path string) (os.FileInfo, error) {
+					switch path {
+					// first call
+					case "/etc/kubernetes/static-pod-resources/kube-apiserver-last-known-good":
+						return nil, os.ErrNotExist
+					// second call
+					case "/etc/kubernetes/static-pod-resources/kube-apiserver-pod-9/kube-apiserver-pod.yaml":
+						return fakeFile("/etc/kubernetes/static-pod-resources/kube-apiserver-pod-9/kube-apiserver-pod.yaml"), nil
+					default:
+						return nil, fmt.Errorf("unexpected path %s", path)
+					}
+				},
+				ReadDirFn: func(path string) ([]os.FileInfo, error) {
+					if path != "/etc/kubernetes/static-pod-resources" {
+						return nil, fmt.Errorf("unexpected path %s", path)
+					}
+					return []os.FileInfo{fakeDir("kube-apiserver-pod-7"), fakeDir("kube-apiserver-pod-12"), fakeDir("kube-apiserver-pod-9")}, nil
+				},
+				SymlinkFn: func(oldname, newname string) error {
+					if oldname != "/etc/kubernetes/static-pod-resources/kube-apiserver-pod-9/kube-apiserver-pod.yaml" {
+						return fmt.Errorf("unexpected oldname %s", oldname)
+					}
+					if newname != "/etc/kubernetes/static-pod-resources/kube-apiserver-last-known-good" {
+						return fmt.Errorf("unexpected newname %s", newname)
+					}
+					return nil
+				},
+				ReadFileFn: func(path string) ([]byte, error) {
+					if path != "/etc/kubernetes/static-pod-resources/kube-apiserver-last-known-good" {
+						return nil, fmt.Errorf("unexpected path %s", path)
+					}
+					return []byte(samplePod), nil
+				},
+				WriteFileFn: func(filename string, data []byte, perm fs.FileMode) error {
+					if filename != "/etc/kubernetes/manifests/kube-apiserver-pod.yaml" {
+						return fmt.Errorf("unexpected path %s", filename)
+					}
+					actualPod, err := resourceread.ReadPodV1(data)
+					if err != nil {
+						return err
+					}
+					expectedPod, err := resourceread.ReadPodV1([]byte(samplePod))
+					if err != nil {
+						return err
+					}
+					expectedPod.UID = actualPod.UID
+					expectedPod.Annotations = map[string]string{}
+					expectedPod.Annotations["startup-monitor.static-pods.openshift.io/fallback-for-revision"] = "8"
+					if !equality.Semantic.DeepEqual(actualPod, expectedPod) {
+						return fmt.Errorf("unexpected pod was written")
+					}
+					return nil
+				},
+			},
+		},
+	}
+
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			// test data
+			target := createTestTarget(scenario.fakeIO)
+
+			// act
+			err := target.fallbackToPreviousRevision()
+			validateError(t, err, scenario.expectedErr)
+			if err := scenario.fakeIO.Validate(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
 
 func TestFindPreviousRevision(t *testing.T) {
 	scenarios := []struct {
-		name string
+		name   string
 		fakeIO *fakeIO
 
 		expectedPrevRev int
-		expectedErr string
-		expectedFound bool
-	} {
+		expectedErr     string
+		expectedFound   bool
+	}{
 		// scenario 1
 		{
 			name: "ReadDir error",
 			fakeIO: &fakeIO{
+				ExpectedReadDirFnCounter: 1,
 				ReadDirFn: func(path string) ([]os.FileInfo, error) {
 					if path != "/etc/kubernetes/static-pod-resources" {
 						return nil, fmt.Errorf("unexpected path %s", path)
@@ -36,6 +170,7 @@ func TestFindPreviousRevision(t *testing.T) {
 		{
 			name: "ReadDir returns empty result",
 			fakeIO: &fakeIO{
+				ExpectedReadDirFnCounter: 1,
 				ReadDirFn: func(path string) ([]os.FileInfo, error) {
 					if path != "/etc/kubernetes/static-pod-resources" {
 						return nil, fmt.Errorf("unexpected path %s", path)
@@ -49,6 +184,7 @@ func TestFindPreviousRevision(t *testing.T) {
 		{
 			name: "ReadDir returns files only",
 			fakeIO: &fakeIO{
+				ExpectedReadDirFnCounter: 1,
 				ReadDirFn: func(path string) ([]os.FileInfo, error) {
 					if path != "/etc/kubernetes/static-pod-resources" {
 						return nil, fmt.Errorf("unexpected path %s", path)
@@ -62,6 +198,7 @@ func TestFindPreviousRevision(t *testing.T) {
 		{
 			name: "ReadDir returns a directory that doesn't match prefix",
 			fakeIO: &fakeIO{
+				ExpectedReadDirFnCounter: 1,
 				ReadDirFn: func(path string) ([]os.FileInfo, error) {
 					if path != "/etc/kubernetes/static-pod-resources" {
 						return nil, fmt.Errorf("unexpected path %s", path)
@@ -75,6 +212,7 @@ func TestFindPreviousRevision(t *testing.T) {
 		{
 			name: "ReadDir returns a directory that has incorrect revision",
 			fakeIO: &fakeIO{
+				ExpectedReadDirFnCounter: 1,
 				ReadDirFn: func(path string) ([]os.FileInfo, error) {
 					if path != "/etc/kubernetes/static-pod-resources" {
 						return nil, fmt.Errorf("unexpected path %s", path)
@@ -89,6 +227,7 @@ func TestFindPreviousRevision(t *testing.T) {
 		{
 			name: "ReadDir returns a single directory",
 			fakeIO: &fakeIO{
+				ExpectedReadDirFnCounter: 1,
 				ReadDirFn: func(path string) ([]os.FileInfo, error) {
 					if path != "/etc/kubernetes/static-pod-resources" {
 						return nil, fmt.Errorf("unexpected path %s", path)
@@ -102,6 +241,7 @@ func TestFindPreviousRevision(t *testing.T) {
 		{
 			name: "prev rev found",
 			fakeIO: &fakeIO{
+				ExpectedReadDirFnCounter: 1,
 				ReadDirFn: func(path string) ([]os.FileInfo, error) {
 					if path != "/etc/kubernetes/static-pod-resources" {
 						return nil, fmt.Errorf("unexpected path %s", path)
@@ -110,28 +250,30 @@ func TestFindPreviousRevision(t *testing.T) {
 				},
 			},
 			expectedPrevRev: 11,
-			expectedFound: true,
+			expectedFound:   true,
 		},
 
 		// scenario 8
 		{
 			name: "prev rev found with sort",
 			fakeIO: &fakeIO{
+				ExpectedReadDirFnCounter: 1,
 				ReadDirFn: func(path string) ([]os.FileInfo, error) {
 					if path != "/etc/kubernetes/static-pod-resources" {
 						return nil, fmt.Errorf("unexpected path %s", path)
 					}
-					return []os.FileInfo{fakeDir("kube-apiserver-pod-12"), fakeDir("kube-apiserver-pod-11")}, nil
+					return []os.FileInfo{fakeDir("kube-apiserver-pod-12"), fakeDir("kube-apiserver-pod-9")}, nil
 				},
 			},
-			expectedPrevRev: 11,
-			expectedFound: true,
+			expectedPrevRev: 9,
+			expectedFound:   true,
 		},
 
 		// scenario 9
 		{
 			name: "prev rev found with files that match the prefix",
 			fakeIO: &fakeIO{
+				ExpectedReadDirFnCounter: 1,
 				ReadDirFn: func(path string) ([]os.FileInfo, error) {
 					if path != "/etc/kubernetes/static-pod-resources" {
 						return nil, fmt.Errorf("unexpected path %s", path)
@@ -140,13 +282,14 @@ func TestFindPreviousRevision(t *testing.T) {
 				},
 			},
 			expectedPrevRev: 11,
-			expectedFound: true,
+			expectedFound:   true,
 		},
 
 		// scenario 10
 		{
 			name: "ReadDir returns an incorrect directory",
 			fakeIO: &fakeIO{
+				ExpectedReadDirFnCounter: 1,
 				ReadDirFn: func(path string) ([]os.FileInfo, error) {
 					if path != "/etc/kubernetes/static-pod-resources" {
 						return nil, fmt.Errorf("unexpected path %s", path)
@@ -167,6 +310,9 @@ func TestFindPreviousRevision(t *testing.T) {
 			prevRev, found, err := target.findPreviousRevision()
 
 			// validate
+			if err := scenario.fakeIO.Validate(); err != nil {
+				t.Error(err)
+			}
 			if prevRev != scenario.expectedPrevRev {
 				t.Errorf("unexpected prevRev %d, expected %d", prevRev, scenario.expectedPrevRev)
 			}
@@ -336,6 +482,10 @@ func TestCreateLastKnowGoodRevisionAndExit(t *testing.T) {
 
 			// validate
 			validateError(t, err, scenario.expectErr)
+			if err := scenario.fakeIO.Validate(); err != nil {
+				t.Error(err)
+			}
+
 			if scenario.fakeIO.ExpectedStatFnCounter != scenario.fakeIO.StatFnCounter {
 				t.Errorf("unexpected StatFn inovations %d, expeccted %d", scenario.fakeIO.StatFnCounter, scenario.fakeIO.ExpectedStatFnCounter)
 			}
@@ -428,9 +578,16 @@ type fakeIO struct {
 	ExpectedRemoveFnCounter int
 
 	ReadFileFn func(string) ([]byte, error)
-	ReadDirFn func(string) ([]fs.FileInfo, error)
+	ReadFileFnCounter int
+	ExpectedReadFileFnCounter int
+
+	ReadDirFn  func(string) ([]fs.FileInfo, error)
+	ReadDirFnCounter int
+	ExpectedReadDirFnCounter int
 
 	WriteFileFn func(filename string, data []byte, perm fs.FileMode) error
+	WriteFileFnCounter int
+	ExpectedWriteFileFnCounter int
 }
 
 func (f *fakeIO) Symlink(oldname string, newname string) error {
@@ -458,6 +615,7 @@ func (f *fakeIO) Remove(path string) error {
 }
 
 func (f *fakeIO) ReadFile(filename string) ([]byte, error) {
+	f.ReadFileFnCounter++
 	if f.ReadFileFn != nil {
 		return f.ReadFileFn(filename)
 	}
@@ -466,6 +624,7 @@ func (f *fakeIO) ReadFile(filename string) ([]byte, error) {
 }
 
 func (f *fakeIO) ReadDir(dirname string) ([]fs.FileInfo, error) {
+	f.ReadDirFnCounter++
 	if f.ReadDirFn != nil {
 		return f.ReadDirFn(dirname)
 	}
@@ -473,10 +632,40 @@ func (f *fakeIO) ReadDir(dirname string) ([]fs.FileInfo, error) {
 }
 
 func (f *fakeIO) WriteFile(filename string, data []byte, perm fs.FileMode) error {
+	f.WriteFileFnCounter++
 	if f.WriteFileFn != nil {
 		return f.WriteFileFn(filename, data, perm)
 	}
 	return nil
+}
+
+func (f *fakeIO) Validate() error {
+	var errs []error
+	if f.SymlinkFnCounter != f.ExpectedSymlinkFnCounter {
+		errs = append(errs, fmt.Errorf("unexpected SymlinkFnCounter %d, expected %d", f.SymlinkFnCounter, f.ExpectedSymlinkFnCounter))
+	}
+
+	if f.StatFnCounter != f.ExpectedStatFnCounter {
+		errs = append(errs, fmt.Errorf("unexpected StatFnCounter %d, expected %d", f.StatFnCounter, f.ExpectedStatFnCounter))
+	}
+
+	if f.RemoveFnCounter != f.ExpectedRemoveFnCounter {
+		errs = append(errs, fmt.Errorf("unexpected RemoveFnCounter %d, expected %d", f.RemoveFnCounter, f.ExpectedRemoveFnCounter))
+	}
+
+	if f.ReadFileFnCounter != f.ExpectedReadFileFnCounter {
+		errs = append(errs, fmt.Errorf("unexpected ReadFileFnCounter %d, expected %d", f.ReadFileFnCounter, f.ExpectedReadFileFnCounter))
+	}
+
+	if f.ReadDirFnCounter != f.ExpectedReadDirFnCounter {
+		errs = append(errs, fmt.Errorf("unexpected ReadDirFnCounter %d, expected %d", f.ReadDirFnCounter, f.ExpectedReadDirFnCounter))
+	}
+
+	if f.WriteFileFnCounter != f.ExpectedWriteFileFnCounter {
+		errs = append(errs, fmt.Errorf("unexpected WriteFileFnCounter %d, expected %d", f.WriteFileFnCounter, f.ExpectedWriteFileFnCounter))
+	}
+
+	return kerrors.NewAggregate(errs)
 }
 
 type fakeFile string
@@ -496,7 +685,6 @@ func (f fakeDir) Mode() fs.FileMode  { return fs.ModeDir | 0500 }
 func (f fakeDir) ModTime() time.Time { return time.Unix(0, 0) }
 func (f fakeDir) IsDir() bool        { return true }
 func (f fakeDir) Sys() interface{}   { return nil }
-
 
 func validateError(t *testing.T, actualErr error, expectedErr string) {
 	if actualErr != nil && len(expectedErr) == 0 {
