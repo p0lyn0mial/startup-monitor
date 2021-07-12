@@ -2,8 +2,8 @@ package monitor
 
 import "time"
 
-// WithProbeResponseTimeout specifies a timeout after which the monitor starts the fall back procedure
-func (sm *StartupMonitor) WithProbeResponseTimeout(timeout time.Duration) *StartupMonitor {
+// WithProbeTimeout specifies a timeout after which the monitor starts the fall back procedure
+func (sm *StartupMonitor) WithProbeTimeout(timeout time.Duration) *StartupMonitor {
 	sm.timeout = timeout
 	return sm
 }
