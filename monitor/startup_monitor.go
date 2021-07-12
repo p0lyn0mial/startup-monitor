@@ -3,7 +3,6 @@ package monitor
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"sort"
@@ -14,6 +13,7 @@ import (
 	"github.com/openshift/library-go/pkg/operator/resource/resourceread"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 )
@@ -67,6 +67,17 @@ func (sm *StartupMonitor) syncErrorWrapper() {
 }
 
 func (sm *StartupMonitor) sync() error {
+	//
+	// TODO: acquire an exclusive lock to coordinate work with the installer pod
+	//
+	// a lock is required to protect the following case:
+	//
+	// an installer is in progress and wants to install a new revision
+	// the current revision is not healthy and we are about to fall back to the previous version (fallbackToPreviousRevision method)
+	// the installer writes the new file and we immediately overwrite it
+	//
+	// additional benefit is that we read consistent operand's manifest
+
 	// to avoid issues on startup and downgrade (before the startup monitor was introduced check the current target's revision.
 	// refrain from any further processing in case we have a mismatch.
 	currentTargetRevision, err := sm.loadRootTargetPodAndExtractRevision()
@@ -172,10 +183,12 @@ func (sm *StartupMonitor) fallbackToPreviousRevision() error {
 		lastKnownGoodPod.Annotations = map[string]string{}
 	}
 	lastKnownGoodPod.Annotations["startup-monitor.static-pods.openshift.io/fallback-for-revision"] = fmt.Sprintf("%d", sm.revision)
-	lastKnownGoodPodBytes := []byte(resourceread.WritePodV1OrDie(lastKnownGoodPod))
 
-	// TODO: resolve fight with the installer pod
-	// TODO: do we need a new UUID for the pod - as the installer pod ?
+	// the kubelet has a bug that prevents graceful termination from working on static pods with the same name, filename
+	// and uuid.  By setting the pod UID we can work around the kubelet bug and get our graceful termination honored.
+	// Per the node team, this is hard to fix in the kubelet, though it will affect all static pods.
+	lastKnownGoodPod.UID = uuid.NewUUID()
+
 	// remove the existing file to ensure kubelet gets "create" event from inotify watchers
 	rootTargetManifestPath := path.Join(sm.manifestsPath, fmt.Sprintf("%s-pod.yaml", sm.targetName))
 	if err := sm.io.Remove(rootTargetManifestPath); err == nil {
@@ -183,6 +196,8 @@ func (sm *StartupMonitor) fallbackToPreviousRevision() error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
+
+	lastKnownGoodPodBytes := []byte(resourceread.WritePodV1OrDie(lastKnownGoodPod))
 	klog.Infof("Writing a static pod manifest %q \n%s", path.Join(rootTargetManifestPath), lastKnownGoodPodBytes)
 	if err := sm.io.WriteFile(path.Join(rootTargetManifestPath), lastKnownGoodPodBytes, 0644); err != nil {
 		return err
@@ -254,7 +269,7 @@ func (sm *StartupMonitor) readTargetPod(filepath string) (*corev1.Pod, error) {
 }
 
 func (sm *StartupMonitor) findPreviousRevision() (int, bool, error) {
-	files, err := ioutil.ReadDir(sm.staticPodResourcesPath)
+	files, err := sm.io.ReadDir(sm.staticPodResourcesPath)
 	if err != nil {
 		return 0, false, err
 	}
@@ -277,7 +292,7 @@ func (sm *StartupMonitor) findPreviousRevision() (int, bool, error) {
 		if len(fileSplit) != 2 {
 			return 0, false, fmt.Errorf("unable to extract revision from %s due to incorrect format", file.Name())
 		}
-		revision, err := strconv.Atoi(fileSplit[2])
+		revision, err := strconv.Atoi(fileSplit[1])
 		if err != nil {
 			return 0, false, err
 		}
@@ -288,7 +303,7 @@ func (sm *StartupMonitor) findPreviousRevision() (int, bool, error) {
 		return 0, false, nil
 	}
 	sort.IntSlice(allRevisions).Sort()
-	return allRevisions[len(allRevisions)-1], true, nil
+	return allRevisions[len(allRevisions)-2], true, nil
 }
 
 func (sm *StartupMonitor) fileExists(filepath string) (bool, error) {

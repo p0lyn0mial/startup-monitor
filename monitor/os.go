@@ -12,6 +12,7 @@ type ioInterface interface {
 	Stat(path string) (os.FileInfo, error)
 	Remove(path string) error
 	ReadFile(filename string) ([]byte, error)
+	ReadDir(dirname string) ([]fs.FileInfo, error)
 	WriteFile(filename string, data []byte, perm fs.FileMode) error
 }
 
@@ -36,6 +37,11 @@ func (realFS) Remove(path string) error {
 // ReadFile will call ioutil.ReadFile to read data
 func (realFS) ReadFile(filename string) ([]byte, error) {
 	return ioutil.ReadFile(filename)
+}
+
+// ReadDir will call ioutil.ReadDir to get a list of fs.FileInfo for the given directory
+func (realFS) ReadDir(dirname string) ([]fs.FileInfo, error) {
+	return ioutil.ReadDir(dirname)
 }
 
 // WriteFile will call ioutil.WriteFile to write data

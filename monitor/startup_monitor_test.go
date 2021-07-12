@@ -8,6 +8,176 @@ import (
 	"time"
 )
 
+
+func TestFindPreviousRevision(t *testing.T) {
+	scenarios := []struct {
+		name string
+		fakeIO *fakeIO
+
+		expectedPrevRev int
+		expectedErr string
+		expectedFound bool
+	} {
+		// scenario 1
+		{
+			name: "ReadDir error",
+			fakeIO: &fakeIO{
+				ReadDirFn: func(path string) ([]os.FileInfo, error) {
+					if path != "/etc/kubernetes/static-pod-resources" {
+						return nil, fmt.Errorf("unexpected path %s", path)
+					}
+					return nil, fmt.Errorf("fake error")
+				},
+			},
+			expectedErr: "fake error",
+		},
+
+		// scenario 2
+		{
+			name: "ReadDir returns empty result",
+			fakeIO: &fakeIO{
+				ReadDirFn: func(path string) ([]os.FileInfo, error) {
+					if path != "/etc/kubernetes/static-pod-resources" {
+						return nil, fmt.Errorf("unexpected path %s", path)
+					}
+					return nil, nil
+				},
+			},
+		},
+
+		// scenario 3
+		{
+			name: "ReadDir returns files only",
+			fakeIO: &fakeIO{
+				ReadDirFn: func(path string) ([]os.FileInfo, error) {
+					if path != "/etc/kubernetes/static-pod-resources" {
+						return nil, fmt.Errorf("unexpected path %s", path)
+					}
+					return []os.FileInfo{fakeFile("kube-apiserver-pod-11"), fakeFile("kube-apiserver-pod-12")}, nil
+				},
+			},
+		},
+
+		// scenario 4
+		{
+			name: "ReadDir returns a directory that doesn't match prefix",
+			fakeIO: &fakeIO{
+				ReadDirFn: func(path string) ([]os.FileInfo, error) {
+					if path != "/etc/kubernetes/static-pod-resources" {
+						return nil, fmt.Errorf("unexpected path %s", path)
+					}
+					return []os.FileInfo{fakeDir("kube-abc-apiserver-pod-11")}, nil
+				},
+			},
+		},
+
+		// scenario 5
+		{
+			name: "ReadDir returns a directory that has incorrect revision",
+			fakeIO: &fakeIO{
+				ReadDirFn: func(path string) ([]os.FileInfo, error) {
+					if path != "/etc/kubernetes/static-pod-resources" {
+						return nil, fmt.Errorf("unexpected path %s", path)
+					}
+					return []os.FileInfo{fakeDir("kube-apiserver-pod-FF")}, nil
+				},
+			},
+			expectedErr: `strconv.Atoi: parsing "FF": invalid syntax`,
+		},
+
+		// scenario 6
+		{
+			name: "ReadDir returns a single directory",
+			fakeIO: &fakeIO{
+				ReadDirFn: func(path string) ([]os.FileInfo, error) {
+					if path != "/etc/kubernetes/static-pod-resources" {
+						return nil, fmt.Errorf("unexpected path %s", path)
+					}
+					return []os.FileInfo{fakeDir("kube-apiserver-pod-11")}, nil
+				},
+			},
+		},
+
+		// scenario 7
+		{
+			name: "prev rev found",
+			fakeIO: &fakeIO{
+				ReadDirFn: func(path string) ([]os.FileInfo, error) {
+					if path != "/etc/kubernetes/static-pod-resources" {
+						return nil, fmt.Errorf("unexpected path %s", path)
+					}
+					return []os.FileInfo{fakeDir("kube-apiserver-pod-11"), fakeDir("kube-apiserver-pod-12")}, nil
+				},
+			},
+			expectedPrevRev: 11,
+			expectedFound: true,
+		},
+
+		// scenario 8
+		{
+			name: "prev rev found with sort",
+			fakeIO: &fakeIO{
+				ReadDirFn: func(path string) ([]os.FileInfo, error) {
+					if path != "/etc/kubernetes/static-pod-resources" {
+						return nil, fmt.Errorf("unexpected path %s", path)
+					}
+					return []os.FileInfo{fakeDir("kube-apiserver-pod-12"), fakeDir("kube-apiserver-pod-11")}, nil
+				},
+			},
+			expectedPrevRev: 11,
+			expectedFound: true,
+		},
+
+		// scenario 9
+		{
+			name: "prev rev found with files that match the prefix",
+			fakeIO: &fakeIO{
+				ReadDirFn: func(path string) ([]os.FileInfo, error) {
+					if path != "/etc/kubernetes/static-pod-resources" {
+						return nil, fmt.Errorf("unexpected path %s", path)
+					}
+					return []os.FileInfo{fakeDir("kube-apiserver-pod-12"), fakeDir("kube-apiserver-pod-11"), fakeFile("kube-apiserver-pod-13"), fakeFile("kube-apiserver-pod-14")}, nil
+				},
+			},
+			expectedPrevRev: 11,
+			expectedFound: true,
+		},
+
+		// scenario 10
+		{
+			name: "ReadDir returns an incorrect directory",
+			fakeIO: &fakeIO{
+				ReadDirFn: func(path string) ([]os.FileInfo, error) {
+					if path != "/etc/kubernetes/static-pod-resources" {
+						return nil, fmt.Errorf("unexpected path %s", path)
+					}
+					return []os.FileInfo{fakeDir("kube-apiserver-abc-11")}, nil
+				},
+			},
+			expectedErr: "unable to extract revision from kube-apiserver-abc-11 due to incorrect format",
+		},
+	}
+
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			// test data
+			target := createTestTarget(scenario.fakeIO)
+
+			// act
+			prevRev, found, err := target.findPreviousRevision()
+
+			// validate
+			if prevRev != scenario.expectedPrevRev {
+				t.Errorf("unexpected prevRev %d, expected %d", prevRev, scenario.expectedPrevRev)
+			}
+			if found != scenario.expectedFound {
+				t.Errorf("unexpected found %v, expected %v", found, scenario.expectedFound)
+			}
+			validateError(t, err, scenario.expectedErr)
+		})
+	}
+}
+
 func TestCreateLastKnowGoodRevisionAndExit(t *testing.T) {
 	scenarios := []struct {
 		name      string
@@ -159,26 +329,13 @@ func TestCreateLastKnowGoodRevisionAndExit(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			// test data
-			target := New(nil)
-			target.io = scenario.fakeIO
-			target.revision = 8
-			target.targetName = "kube-apiserver"
-			target.staticPodResourcesPath = "/etc/kubernetes/static-pod-resources"
-			target.manifestsPath = "/etc/kubernetes/manifests"
+			target := createTestTarget(scenario.fakeIO)
 
 			// act
 			err := target.createLastKnowGoodRevisionAndDestroy()
 
 			// validate
-			if err != nil && len(scenario.expectErr) == 0 {
-				t.Fatalf("unexpected error %v", err)
-			}
-			if err == nil && len(scenario.expectErr) > 0 {
-				t.Fatal("expected to get an error")
-			}
-			if err != nil && err.Error() != scenario.expectErr {
-				t.Fatalf("incorrect error: %v, expected: %v", err, scenario.expectErr)
-			}
+			validateError(t, err, scenario.expectErr)
 			if scenario.fakeIO.ExpectedStatFnCounter != scenario.fakeIO.StatFnCounter {
 				t.Errorf("unexpected StatFn inovations %d, expeccted %d", scenario.fakeIO.StatFnCounter, scenario.fakeIO.ExpectedStatFnCounter)
 			}
@@ -247,6 +404,16 @@ func TestLoadTargetManifestAndExtractRevision(t *testing.T) {
 	}
 }
 
+func createTestTarget(fakeIO *fakeIO) *StartupMonitor {
+	target := New(nil)
+	target.io = fakeIO
+	target.revision = 8
+	target.targetName = "kube-apiserver"
+	target.staticPodResourcesPath = "/etc/kubernetes/static-pod-resources"
+	target.manifestsPath = "/etc/kubernetes/manifests"
+	return target
+}
+
 type fakeIO struct {
 	StatFn                func(string) (os.FileInfo, error)
 	StatFnCounter         int
@@ -261,6 +428,7 @@ type fakeIO struct {
 	ExpectedRemoveFnCounter int
 
 	ReadFileFn func(string) ([]byte, error)
+	ReadDirFn func(string) ([]fs.FileInfo, error)
 
 	WriteFileFn func(filename string, data []byte, perm fs.FileMode) error
 }
@@ -297,6 +465,13 @@ func (f *fakeIO) ReadFile(filename string) ([]byte, error) {
 	return nil, nil
 }
 
+func (f *fakeIO) ReadDir(dirname string) ([]fs.FileInfo, error) {
+	if f.ReadDirFn != nil {
+		return f.ReadDirFn(dirname)
+	}
+	return nil, nil
+}
+
 func (f *fakeIO) WriteFile(filename string, data []byte, perm fs.FileMode) error {
 	if f.WriteFileFn != nil {
 		return f.WriteFileFn(filename, data, perm)
@@ -321,3 +496,16 @@ func (f fakeDir) Mode() fs.FileMode  { return fs.ModeDir | 0500 }
 func (f fakeDir) ModTime() time.Time { return time.Unix(0, 0) }
 func (f fakeDir) IsDir() bool        { return true }
 func (f fakeDir) Sys() interface{}   { return nil }
+
+
+func validateError(t *testing.T, actualErr error, expectedErr string) {
+	if actualErr != nil && len(expectedErr) == 0 {
+		t.Fatalf("unexpected error %v", actualErr)
+	}
+	if actualErr == nil && len(expectedErr) > 0 {
+		t.Fatal("expected to get an error")
+	}
+	if actualErr != nil && actualErr.Error() != expectedErr {
+		t.Fatalf("incorrect error: %v, expected: %v", actualErr, expectedErr)
+	}
+}
